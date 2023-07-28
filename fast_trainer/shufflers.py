@@ -28,6 +28,46 @@ class Shuffler:
                                                generator=self.generator,
                                                device=self.initial_idx.device)]
 
+class SubgraphShuffler:
+    initial_idx: torch.Tensor
+    world_size: int
+    initial_seed: int
+    generator: torch.Generator
+    epoch: int
+
+    DEFAULT_INITIAL_SEED = 2147483647
+
+    # The sizes of idx and idx_to_subgraph_id tensors should match.
+    # The idx_to_subgraph_id tensor is an integer tensor that contains the subgraph id for each vertex id in the idx tensor.
+    def __init__(self, idx : torch.Tensor, idx_to_subgraph_id : torch.Tensor, initial_seed=DEFAULT_INITIAL_SEED):
+        assert idx.dim() == 1
+        # First we reorder the idx tensor so that subgraphs with the same ID are contiguous.
+        sorted_indices = torch.argsort(idx_to_subgraph_id)
+        reordered_idx = idx[sorted_indices]
+        reordered_idx_to_subgraph_id = idx_to_subgraph_id[sorted_indices]
+        subgraph_ids,subgraph_sizes = torch.unique_consecutive(reordered_idx_to_subgraph_id, return_counts=True)
+        end_idx = torch.cumsum(subgraph_sizes, dim=-1)
+        start_idx = torch.cat((torch.tensor([0]),torch.cumsum(subgraph_sizes, dim=-1)), dim=0).resize_(subgraph_sizes.size())
+        idx_ranges = torch.stack([start_idx, end_idx]).t().to(dtype=torch.int)
+
+        self.initial_idx = idx
+        self.idx_ranges = idx_ranges
+        self.num_subgraphs = idx_ranges.size()[0]
+        self.initial_seed = initial_seed
+        
+        self.generator = torch.Generator(device='cpu')
+        self.set_epoch(0)
+
+    def get_num_subgraphs(self):
+        return self.num_subgraphs
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def get_idx(self):
+        self.generator.manual_seed(self.initial_seed + self.epoch)
+        return self.initial_idx, self.idx_ranges[torch.randperm(self.num_subgraphs,
+                                                                generator=self.generator)]
 
 class DistributedShuffler(Shuffler):
     world_size: int
@@ -44,6 +84,32 @@ class DistributedShuffler(Shuffler):
         stop = (n * (rank + 1)) // self.world_size
         return shuffled_idx[start: stop]
 
+class DistributedSubgraphShuffler(SubgraphShuffler):
+    world_size: int
+
+    def __init__(self, idx, idx_to_subgraph_id : torch.Tensor, world_size,
+                 initial_seed=Shuffler.DEFAULT_INITIAL_SEED):
+        super().__init__(idx, idx_to_subgraph_id, initial_seed)
+        self.world_size = world_size
+
+    def get_idx(self, rank):
+        global_idx, global_idx_ranges = super().get_idx()
+        n = global_idx_ranges.size()[0]
+        if n % self.world_size != 0:
+            global_idx_ranges = global_idx_ranges[n%self.world_size:]
+            n = global_idx_ranges.size()[0]
+        assert n % self.world_size == 0
+
+        start = (n * rank) // self.world_size
+        stop = (n * (rank + 1)) // self.world_size
+        ret_idx_list = []
+        ret_range_list = []
+        total = 0
+        for i in range(start, stop):
+            ret_idx_list.append(global_idx[global_idx_ranges[i][0] : global_idx_ranges[i][1]])
+            ret_range_list.append(torch.tensor([[total, total + global_idx_ranges[i][1] - global_idx_ranges[i][0]]]))
+            total += global_idx_ranges[i][1] - global_idx_ranges[i][0]
+        return torch.cat(ret_idx_list, dim=-1), torch.cat(ret_range_list, dim=-1) #global_idx_ranges[start : stop]
 
 #class DistributedShuffler(Shuffler):
 #    """

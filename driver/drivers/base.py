@@ -120,6 +120,7 @@ class BaseDriver:
 
         # Simulate communication instead of computation (training, test, etc.)
         if self.simulate_communication and self.args.distribute_data:
+            assert False and "Disabled on this branch."
             simulate_cfg = FastSamplerConfig(
                 # Do not need features and labels. 
                 x_cpu=torch.zeros(0), x_gpu=torch.zeros(0), y=torch.zeros(0),
@@ -151,6 +152,7 @@ class BaseDriver:
                 rowptr=self.dataset.rowptr, col=self.dataset.col,
                 # After the initial creation, this config object with a shuffled idx, can use placeholder data.
                 idx=torch.zeros(1, dtype=torch.int64),
+                explicit_batch_sizes = None,
                 batch_size=args.train_batch_size,
                 sizes=args.train_fanouts,
                 skip_nonfull_batch=False,
@@ -173,6 +175,7 @@ class BaseDriver:
                 rowptr=self.dataset.rowptr, col=self.dataset.col,
                 # After the initial creation, this config object with a shuffled idx, can use placeholder data.
                 idx=torch.empty(self.dataset.split_idx['train'].numel(), dtype=torch.int64),
+                explicit_batch_sizes = None,
                 batch_size=args.train_batch_size,
                 sizes=args.train_fanouts,
                 skip_nonfull_batch=False,
@@ -277,6 +280,7 @@ class BaseDriver:
         return self.devices[0]
 
     def get_idx_test(self) -> None:
+        raise Exception("Verifying that this is not used.")
         return self.dataset.split_idx['test']
 
     def make_train_devit(self) -> DeviceIterator:
@@ -324,10 +328,15 @@ class BaseDriver:
                 runtime_stats_cuda.start_region(
                     "preamble", runtime_stats_cuda.get_last_event())
                 if self.args.train_sampler == 'NeighborSampler':
+                    if self.args.experimental_explicit_batches:
+                        raise Exception("NeighborSampler not supported when using experimental features.")
                     self.train_loader.node_idx = self.get_idx(epoch)
                     devit = self.train_loader
                 else:
-                    self.train_loader.idx = self.get_idx(epoch)
+                    if self.args.experimental_explicit_batches:
+                        self.train_loader.idx,self.train_loader.explicit_batch_sizes = self.get_explicit_batches(epoch)
+                    else:
+                        self.train_loader.idx = self.get_idx(epoch)
                     devit = self.make_train_devit()
                 runtime_stats_cuda.end_region("preamble")
                 runtime_stats_cuda.end_region(
@@ -462,11 +471,18 @@ class BaseDriver:
                     id_set_name = 'test'
                     minibatch_size = self.args.final_test_batchsize * self.get_num_trainers()
 
+                if self.args.experimental_explicit_batches:
+                    eval_idx, eval_explicit_batch_sizes = self.get_explicit_batches_test(name)
+                    print("Using experimental explicit batches for testing")
+                else:
+                    eval_idx = self.get_idx_test(name)
+                    eval_explicit_batch_sizes = None
 
                 cfg = FastSamplerConfig(
                     x_cpu=self.x_cpu, x_gpu=self.x_gpu, y=self.dataset.y.unsqueeze(-1),
                     rowptr=self.dataset.rowptr, col=self.dataset.col,
-                    idx=self.get_idx_test(name),
+                    idx=eval_idx,
+                    explicit_batch_sizes = eval_explicit_batch_sizes,
                     batch_size=local_batchsize,
                     sizes=local_fanouts,
                     skip_nonfull_batch=False,

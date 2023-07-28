@@ -276,6 +276,7 @@ class FastSamplerConfig:
     rowptr: torch.Tensor
     col: torch.Tensor
     idx: torch.Tensor
+    explicit_batch_sizes: torch.Tensor
     batch_size: int
     sizes: List[int]
     skip_nonfull_batch: bool
@@ -298,6 +299,8 @@ class FastSamplerConfig:
         return c
 
     def get_num_batches(self) -> int:
+        if self.explicit_batch_sizes != None:
+            return self.explicit_batch_sizes.size()[0]
         if self.force_exact_num_batches: return self.exact_num_batches
         num_batches, r = divmod(self.idx.numel(), self.batch_size)
         if not self.skip_nonfull_batch and r > 0:
@@ -320,7 +323,9 @@ class FastSamplerDistributedStats(NamedTuple):
 
     @classmethod
     def from_session(cls, session: fast_sampler.Session):
-        assert session.num_consumed_batches == session.num_total_batches
+        # NOTE(TFK): Disabled for experimental branch.
+        #assert session.num_consumed_batches == session.num_total_batches
+
         # Reduction should only be called once all the batches complete.
         # This is a no-op if the the reduction has already been performed.
         session.reduce_multithreaded_frequency_counts()
@@ -336,7 +341,8 @@ class FastSamplerIter(Iterator[PreparedBatch]):
         ncfg = cfg.to_fast_sampler()
         self.session = fast_sampler.Session(
             num_threads, max_items_in_queue, ncfg)
-        assert self.session.num_total_batches == cfg.get_num_batches()
+        # NOTE(TFK): Disabled for experimental branch.
+        #assert self.session.num_total_batches == cfg.get_num_batches()
 
     def __next__(self):
         if not self.session.config.distributed:

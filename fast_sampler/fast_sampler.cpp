@@ -517,13 +517,17 @@ struct FastSamplerConfig {
   torch::Tensor x_cpu;
   torch::Tensor x_gpu;
   std::optional<torch::Tensor> y;
+
+  // Format is 2D tensor [(start_idx1, end_idx1), (start_idx2, end_idx2), ..., ]
+  std::optional<torch::Tensor> explicit_batch_sizes;
+
   torch::Tensor rowptr, col, idx;
   std::vector<int64_t> sizes;
   bool skip_nonfull_batch;
   bool pin_memory;
   bool distributed;
   RangePartitionBook partition_book;
-  Cache cache;
+  Cache* cache;
   bool force_exact_num_batches;
   size_t exact_num_batches;
   bool count_remote_frequency;
@@ -589,7 +593,18 @@ class FastSamplerSession {
     // Otherwise, 1 or more machines may complete while the other ones hang in the all2all trying to exchange data.
     // Minor edge case: fails if avg_size < 1.
     // This branch ignores the batch_size.
-    if (config.force_exact_num_batches) {
+    //
+    if (config.explicit_batch_sizes.has_value()) {
+        printf("Using explicit batch sizes.\n");
+	auto explicit_batch_sizes = *(config.explicit_batch_sizes);
+        uint64_t sum = 0;
+	std::cout << explicit_batch_sizes.sizes() << std::endl;
+        for (size_t i = 0; i < explicit_batch_sizes.sizes()[0]; i++) {
+            auto tmp = Range(explicit_batch_sizes[i][0].item<int32_t>(), sum + explicit_batch_sizes[i][1].item<int32_t>());
+            num_total_batches++;
+            inputs.enqueue(iptok, Range(explicit_batch_sizes[i][0].item<int32_t>(), sum + explicit_batch_sizes[i][1].item<int32_t>()));
+	}
+    } else if (config.force_exact_num_batches) {
         std::vector<uint64_t> batch_sizes(config.exact_num_batches);
         int64_t remaining_elements_to_allocate = n;
         uint64_t avg_size = n / config.exact_num_batches - 1;
@@ -1167,7 +1182,7 @@ void fast_sampler_thread(FastSamplerSlot& slot) {
         nextTime("block2b")
         nextTime("block2b2")
         // Only check if remote vertices are cached.
-        torch::Tensor cached_bool = config.cache.nid_is_cached(remote);
+        torch::Tensor cached_bool = config.cache->nid_is_cached(remote);
         nextTime("block2c")
         torch::Tensor cached_out_of_remote_indices = cached_bool.nonzero().view(-1);
         nextTime("block2d")
@@ -1253,7 +1268,7 @@ void fast_sampler_thread(FastSamplerSlot& slot) {
 
         nextTime("block7")
         // For cached vertices, translate to indices into the local cache.
-        cached_nids = config.cache.nid2cachenid(cached);
+        cached_nids = config.cache->nid2cachenid(cached);
         nextTime("block8")
         nextTime("block9")
 
@@ -1295,6 +1310,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("rowptr", &FastSamplerConfig::rowptr)
       .def_readwrite("col", &FastSamplerConfig::col)
       .def_readwrite("idx", &FastSamplerConfig::idx)
+      .def_readwrite("explicit_batch_sizes", &FastSamplerConfig::explicit_batch_sizes)
       .def_readwrite("batch_size", &FastSamplerConfig::batch_size)
       .def_readwrite("sizes", &FastSamplerConfig::sizes)
       .def_readwrite("skip_nonfull_batch",

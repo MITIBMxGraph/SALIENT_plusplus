@@ -49,6 +49,7 @@ if __name__ == '__main__':
     parser.add_argument("--train_max_num_batches", help="maximum number of concurrent sampling batches", type=int, default=48)
     parser.add_argument("--job_root", help="root dir for job outputs", type=str, default="../experiments")
     parser.add_argument("--pipeline_disabled", help="disable the pipeline", action="store_true")
+    parser.add_argument("--experimental_explicit_batches", help="enable experimental explicit batches", action="store_true")
     parser.add_argument("--distribute_data", help="whether use partitioned data", action="store_true")
     parser.add_argument("--run_local", help="run on a single machine", action="store_true")
     parser.add_argument("--make_deterministic", help="make training/inference deterministic", action="store_true")
@@ -131,6 +132,11 @@ if __name__ == '__main__':
     VARS["ONE_NODE_DDP"] = ""
     preVARS = dict()
     preVARS["SLURM_CONFIG"] = SLURM_CONFIG
+    if args.experimental_explicit_batches:
+        VARS["EXPERIMENTAL_EXPLICIT_BATCHES"] = "--experimental_explicit_batches"
+    else:
+        VARS["EXPERIMENTAL_EXPLICIT_BATCHES"] = ""
+
     if args.run_local:
         VARS["SLURM_CONFIG"] = ""
         VARS["ONE_NODE_DDP"] = "--one_node_ddp"
@@ -181,6 +187,7 @@ NCCL_NSOCKS_PERTHREAD=1 NCCL_SOCKET_NTHREADS=1 PYTHONOPTIMIZE=1 OMP_NUM_THREADS=
     {MAKE_DETERMINISTIC} \\
     {ONE_NODE_DDP} \\
     {DO_TEST_RUN} \\
+    {EXPERIMENTAL_EXPLICIT_BATCHES} \\
     --do_test_run_filename {DO_TEST_RUN_FILENAME} \\
     --num_layers {NUM_LAYERS} \\
     --overwrite_job_dir \\

@@ -20,6 +20,9 @@ def make_parser():
     parser.add_argument("job_name",
                         help="name of the job",
                         type=str)
+    parser.add_argument("--experimental_explicit_batches",
+                        help="Experimental feature. Support training with explicitly selected batches of vertices.",
+                        action="store_true")
     parser.add_argument("--dataset_root",
                         help="dataset root path",
                         type=str, default=f"fast_dataset/")

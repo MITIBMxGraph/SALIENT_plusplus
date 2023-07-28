@@ -7,7 +7,7 @@ from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 import gc
 from . import BaseDriver
-from fast_trainer.shufflers import DistributedShuffler, FederatedDistributedShuffler
+from fast_trainer.shufflers import DistributedShuffler, FederatedDistributedShuffler, DistributedSubgraphShuffler
 from fast_trainer.utils import Timer
 
 from ..dataset import DisjointPartFeatReorderedDataset
@@ -317,7 +317,17 @@ class DDPDriver(BaseDriver):
         super().__init__(args, [device], dataset, model_type)
 
         if args.distribute_data:
-            if args.load_balance_scheme == "fully_random":
+            raise Exception("Experimental explicit batches does not yet support distribute_data=1")
+            if args.experimental_explicit_batches:
+                assert args.load_balance_scheme == "federated"
+                raise Exception("Experimental explicit batches is not enabled when doing distribute_data=1 currently.")
+                self.train_shuffler = FederatedDistributedSubgraphShuffler(
+                        dataset.split_idx_parts[dist.get_rank()]['train'])
+                self.valid_shuffler = FederatedDistributedSubgraphShuffler(
+                        dataset.split_idx_parts[dist.get_rank()]['valid'])
+                self.test_shuffler = FederatedDistributedSubgraphShuffler(
+                        dataset.split_idx_parts[dist.get_rank()]['test'])
+            elif args.load_balance_scheme == "fully_random":
                 print('Using DistributedShuffler', flush=True)
                 self.train_shuffler = DistributedShuffler(
                     dataset.split_idx['train'], ddp_cfg.world_size)
@@ -329,12 +339,23 @@ class DDPDriver(BaseDriver):
             else:
                 raise ValueError("Supported load balance schemes are 'fully_random' & 'federated'.")
         else:
-            self.train_shuffler = DistributedShuffler(
-                self.dataset.split_idx['train'], ddp_cfg.world_size)
-            self.test_shuffler = DistributedShuffler(
-                self.dataset.split_idx['test'], ddp_cfg.world_size)
-            self.valid_shuffler = DistributedShuffler(
-                self.dataset.split_idx['valid'], ddp_cfg.world_size)
+            if args.experimental_explicit_batches:
+                fake_subgraph_ids_train = torch.randint(low=0, high=max(self.dataset.split_idx['train'].numel() // args.train_batch_size, 10), size=self.dataset.split_idx['train'].size())
+                self.train_shuffler = DistributedSubgraphShuffler(
+                        self.dataset.split_idx['train'], fake_subgraph_ids_train, ddp_cfg.world_size)
+                fake_subgraph_ids_valid = torch.randint(low=0, high=max(self.dataset.split_idx['valid'].numel() // args.train_batch_size, 10), size=self.dataset.split_idx['valid'].size())
+                self.valid_shuffler = DistributedSubgraphShuffler(
+                        self.dataset.split_idx['valid'], fake_subgraph_ids_valid, ddp_cfg.world_size)
+                fake_subgraph_ids_test = torch.randint(low=0, high=max(self.dataset.split_idx['test'].numel() // args.train_batch_size, 10), size=self.dataset.split_idx['test'].size())
+                self.test_shuffler = DistributedSubgraphShuffler(
+                        self.dataset.split_idx['test'], fake_subgraph_ids_test, ddp_cfg.world_size)
+            else:
+                self.train_shuffler = DistributedShuffler(
+                        self.dataset.split_idx['train'], ddp_cfg.world_size)
+                self.test_shuffler = DistributedShuffler(
+                        self.dataset.split_idx['test'], ddp_cfg.world_size)
+                self.valid_shuffler = DistributedShuffler(
+                        self.dataset.split_idx['valid'], ddp_cfg.world_size)
 
         self.reset()
 
@@ -353,10 +374,14 @@ class DDPDriver(BaseDriver):
     def get_idx_test(self, name):
         if self.args.distribute_data:
             if name == 'test':
+                if args.experimental_explicit_batches:
+                    return self.test_shuffler.get_idx(self.global_rank)
                 #return self.test_shuffler.get_idx(self.global_rank)
                 # not shuffling
                 return self.dataset.split_idx_parts[dist.get_rank()][name]
             elif name == 'valid':
+                if args.experimental_explicit_batches:
+                    return self.valid_shuffler.get_idx(self.global_rank)
                 #return self.valid_shuffler.get_idx(self.global_rank)
                 # not shuffling
                 return self.dataset.split_idx_parts[dist.get_rank()][name]
@@ -381,6 +406,20 @@ class DDPDriver(BaseDriver):
             return self.train_shuffler.get_idx(self.global_rank)
 
         return idx.reshape(-1)
+
+    # Called druing the training loop
+    def get_explicit_batches(self, epoch : int):
+        self.train_shuffler.set_epoch(epoch)
+        return self.train_shuffler.get_idx(self.global_rank)
+
+    # Called during evaluation. The "name" argument refers to the name of the split: train, valid, test
+    def get_explicit_batches_test(self, name : str):
+        if name == "valid":
+            return self.valid_shuffler.get_idx(self.global_rank)
+        elif name == "test":
+            return self.test_shuffler.get_idx(self.global_rank)
+        else:
+            raise Exception("get_explicit_batches_test(name) must be called with name : 'test' | 'valid' ")
 
     # CACHING COMPONENT
     # HACK, since life cycle of the FastSampler is only one epoch, and the stats are collected in FastSampler,
